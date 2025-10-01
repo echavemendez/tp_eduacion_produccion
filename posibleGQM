@@ -1,3 +1,34 @@
-mjcnfkjhcvkjxncvkj
+import duckdb as dd
+import pandas as pd
+
+actividadYsexo = 'C:/Users/Reni/Desktop/Labo/tp1/Datos_por_departamento_actividad_y_sexo.csv'
+df_actividadYsexo = pd.read_csv(actividadYsexo)
+
+#print(df_actividadYsexo)
+
+deptos = """
+SELECT departamento 
+FROM  df_actividadYsexo
+"""
+
+deptos_df = dd.query(deptos).df()
+print(deptos_df)
+
+deptos_a_corregir = """
+SELECT COUNT(*) AS cant_a_corregir
+FROM deptos_df
+WHERE departamento LIKE '%Ã%'
+"""
+df_deptos_a_corregir = dd.query(deptos_a_corregir).df()
+print(df_deptos_a_corregir)
+
+
+colon = """
+SELECT departamento 
+FROM deptos_df
+WHERE departamento= 'Colón'
+"""
+df_colon = dd.query(colon).df()
+print(df_colon)
 
 

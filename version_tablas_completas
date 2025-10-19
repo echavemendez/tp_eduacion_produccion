@@ -350,7 +350,7 @@ df_ep_en_ubicación = dd.query(query_ep_en_ubicación).df()
 # de la tabla anterior nos quedamos solo con Nombre Provincia, Nombre Departamento, y contamos cuantos empleados
 # hay por cada Provincia y Departamento, luego ordenamos descendientemente por Provincia, y por cantidad de empleados
 
-query_empleados_por_ubicación = """
+query_empleados_por_ubicacion = """
 SELECT 
     nombre_provincia AS Provincia,
     nombre_depto AS Departamento,
@@ -360,7 +360,7 @@ GROUP BY nombre_provincia, nombre_depto
 ORDER BY Provincia ASC, Cantidad_de_empleados_en_2022 DESC
 """
 # Tabla final del ejercicio 2
-df_empleados_por_ubicación = dd.query(query_empleados_por_ubicación).df()
+df_empleados_por_ubicacion = dd.query(query_empleados_por_ubicacion).df()
 
 #%%
 #Tabla item iii)

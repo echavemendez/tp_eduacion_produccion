@@ -193,7 +193,7 @@ df_ubicacion_con_nombres = dd.query(query_ubicacion_con_nombres).df()
 
 query_esta_en="""
     SELECT e.col1, a.id_provincia, a.id_depto 
-    FROM df_esta_en_aux a
+    FROM df_ubicacion_con_nombres a
     RIGHT JOIN df_educativos e
     ON ((LOWER(e.col0) = LOWER(a.nombre_provincia)) AND (LOWER(e.col11) = LOWER(a.nombre_depto)))
 """
@@ -271,7 +271,7 @@ SELECT DISTINCT
             edad_terciario, 
             edad_terciario_tecnico
 FROM df_pob_ubi_con_nombres p 
-INNER JOIN df_ee_con_prov e
+INNER JOIN df_ee_con_nombres_prov_y_depto e
 ON (
     LOWER(p.Provincia)  = LOWER(e.Provincia) AND LOWER(p.Departamento) = LOWER(e.Departamento)
     )

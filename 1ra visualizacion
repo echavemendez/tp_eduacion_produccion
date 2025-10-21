@@ -1,0 +1,595 @@
+
+import pandas as pd
+import numpy as np
+import duckdb as dd
+import unicodedata #para corregir formato de los departamentos
+import matplotlib.pyplot as plt
+
+#%%
+# Cargar los 4 archivos directamente
+carpeta = r'C:\Users\Manuel\Desktop\tp_labo'
+df_actividades = pd.read_csv(carpeta + '/actividades_establecimientos.csv')
+
+df_educativos = pd.read_excel(carpeta + '/2022_padron_oficial_establecimientos_educativos.xlsx', skiprows=6)
+
+# renombramos las columnas porque hay nombres repetidos y se dificulta referenciarlas bien para armar las tablas correctamente
+df_educativos.columns = [f"col{i}" for i in range(len(df_educativos.columns))]
+
+df_productivos = pd.read_csv(carpeta + '/Datos_por_departamento_actividad_y_sexo.csv')
+
+df_padron_poblacion = pd.read_excel(carpeta + '/padron_poblacion.xlsX',skiprows=12)
+
+#%%
+# tabla establecimientos educativos
+query_establecimientos_educativos = """
+SELECT col1 AS cueanexo, col20 AS jardin_maternal, col21 AS jardin_infantil, 
+       col22 AS primario, col23 AS secundario, col24 AS secundario_tecnico, 
+       col25 AS terciario, col26 AS terciario_tecnico
+FROM df_educativos
+"""
+df_establecimientos_educativos = dd.query(query_establecimientos_educativos).df()
+#%%
+# tabla departamento
+query_departamento = """
+SELECT DISTINCT in_departamentos AS id_depto, departamento AS nombre_depto
+FROM df_productivos
+ORDER BY id_depto DESC
+"""
+df_departamento = dd.query(query_departamento).df()
+def quitar_tildes(texto):
+    if isinstance(texto, str):
+        # Normaliza el texto y elimina los acentos
+        texto_sin_tilde = unicodedata.normalize('NFKD', texto)
+        return ''.join(c for c in texto_sin_tilde if not unicodedata.combining(c))
+    return texto
+
+# aplicamos la función a la columna
+df_departamento["nombre_depto"] = df_departamento["nombre_depto"].apply(quitar_tildes)
+#%%
+# tabla provincia
+# corregimos nombres y formatos asi luego no tenemos problemas en los JOIN.
+query_provincia = """
+SELECT DISTINCT
+    provincia_id AS id_provincia,
+    CASE
+        WHEN LOWER(TRIM(provincia)) IN ('caba', 'ciudad autonoma de buenos aires', 'ciudad autónoma de buenos aires') THEN 'Ciudad de Buenos Aires'
+        WHEN LOWER(TRIM(provincia)) = 'cordoba' THEN 'Córdoba'
+        WHEN LOWER(TRIM(provincia)) = 'entre rios' THEN 'Entre Ríos'
+        WHEN LOWER(TRIM(provincia)) = 'tucuman' THEN 'Tucumán'
+        WHEN LOWER(TRIM(provincia)) = 'rio negro' THEN 'Río Negro'
+        WHEN LOWER(TRIM(provincia)) = 'neuquen' THEN 'Neuquén'
+        WHEN LOWER(TRIM(provincia)) = 'santiago del estero' THEN 'Santiago del Estero'
+        WHEN LOWER(TRIM(provincia)) = 'tierra del fuego' THEN 'Tierra del Fuego'
+        ELSE provincia
+    END AS nombre_provincia
+FROM df_productivos
+"""
+df_provincia = dd.query(query_provincia).df()
+
+#%%
+# tabla actividad
+query_actividad = """
+        SELECT clae6,clae6_desc
+        FROM df_actividades
+"""
+df_actividad = dd.query(query_actividad)
+#%%
+# tabla establecimientos productivos
+query_establecimientos_productivos = """
+    SELECT  provincia_id AS id_provincia, in_departamentos AS id_depto, clae6, genero, Empleo, Establecimientos, empresas_exportadoras
+    FROM df_productivos
+    WHERE anio == 2022
+"""
+df_establecimientos_productivos = dd.query(query_establecimientos_productivos).df()
+
+#%%
+# reformateo de padron_poblacion ya que esta muy feo. 
+
+# renombramos las columnas ya que no son declarativos (se perdieron los nombres originales por el formato del excel dado)
+
+# creamos una columna auxiliar para identificar las filas con "AREA # ..."
+df_padron_poblacion['id_depto'] = df_padron_poblacion['Unnamed: 1'].where(df_padron_poblacion['Unnamed: 1'].astype(str).str.startswith('AREA'))
+
+# propagamos el área hacia abajo para rellenar las filas de la subtabla
+df_padron_poblacion['id_depto'] = df_padron_poblacion['id_depto'].ffill()
+
+# nos quedamos solo con las filas que tienen datos de la tabla (Edad no nula)
+df_padron_aux = df_padron_poblacion[df_padron_poblacion['Unnamed: 1'].notna()].copy()
+
+# renombramos columnas a algo legible
+df_padron_limpio = df_padron_aux.rename(columns={
+    'Unnamed: 1': 'Edad',
+    'Unnamed: 2': 'Casos',
+    'Unnamed: 3': 'Porcentaje',
+    'Unnamed: 4': 'Porcentaje Acumulado',
+})
+# limpiamos el campo del área (sacamos el texto y nos quedamos con el número)
+df_padron_limpio['id_depto'] = df_padron_aux['id_depto'].str.replace('AREA #', '').str.strip()
+df_padron_limpio = df_padron_limpio.drop(columns=['area'], errors='ignore')
+df_padron_limpio = df_padron_limpio.drop(columns=['Unnamed: 0'], errors='ignore')
+
+# nos quedamos solo con filas donde las columnas numéricas son efectivamente números
+cols_numericas = ['Edad', 'Casos', 'Porcentaje', 'Porcentaje Acumulado', 'id_depto']
+df_padron_limpio = df_padron_limpio.dropna(subset=cols_numericas)  # eliminamos filas con NaN
+df_padron_limpio = df_padron_limpio[df_padron_limpio[cols_numericas].applymap(lambda x: str(x).replace('.', '', 1).isdigit()).all(axis=1)] #reemplazamos para trabajo mas comodo a posteriori
+
+# convertimos las columnas a numérico para asegurarnos de poder joinear luego sin tener que castear como otro tipo de dato
+for col in cols_numericas:
+    df_padron_limpio[col] = pd.to_numeric(df_padron_limpio[col])
+
+
+#%% 
+#ahora si, tabla poblacion
+
+# diccionario de rangos educativos con edades mínimas y máximas
+rangos_educativos = {
+    'edad_jardin_maternal': (0, 2),
+    'edad_jardin_infantil': (3, 5),
+    'edad_primaria': (6, 13),
+    'edad_secundaria': (12, 17),
+    'edad_secundaria_tecnica': (12, 19),
+    'edad_terciario': (18, 120),
+    'edad_terciario_tecnico': (18, 120)
+}
+
+# función que devuelve la lista de rangos educativos para una edad dada
+def asignar_rangos_educativos(edad):
+    return [rango for rango, (min_edad, max_edad) in rangos_educativos.items() if min_edad <= edad <= max_edad]
+
+# expandimos el DataFrame para manejar solapamientos, ya que las personas que pueden ir a la secundaria normal, pueden ir a la tecnica, lo mismo con el terciario.
+df_expanded = df_padron_limpio.assign(rangos=df_padron_limpio['Edad'].apply(asignar_rangos_educativos)).explode('rangos')
+df_expanded = df_expanded.rename(columns={'rangos': 'rango_educativo'})
+
+# sumamos los casos por departamento y rango educativo
+query = """
+SELECT 
+    id_depto,
+    rango_educativo,
+    SUM(casos) AS total_casos
+FROM df_expanded
+GROUP BY id_depto, rango_educativo
+"""
+df_suma = dd.query(query).df()
+
+# pivotamos para que cada rango educativo sea una columna
+df_poblacion = df_suma.pivot(index='id_depto', columns='rango_educativo', values='total_casos').fillna(0).reset_index()
+
+# aseguramos que todas las columnas existan aunque no haya datos con ayuda del diccionario que creamos antes
+
+columnas = ['id_depto'] + list(rangos_educativos.keys())
+for col in columnas:
+    if col not in df_poblacion.columns:
+        df_poblacion[col] = 0
+
+df_poblacion = df_poblacion[columnas]
+
+
+#%%
+# tabla ubicación
+query_ubicacion = """
+SELECT DISTINCT provincia_id AS id_provincia, in_departamentos AS id_depto
+FROM df_productivos
+"""
+df_ubicacion = dd.query(query_ubicacion).df()
+#%%
+# asociamos ubicacion con nombre
+query_ubicacion_con_nombres = """
+SELECT 
+    u.id_provincia,p.nombre_provincia,
+    u.id_depto, d.nombre_depto
+FROM df_ubicacion u
+INNER JOIN df_provincia p
+    ON u.id_provincia = p.id_provincia
+INNER JOIN df_departamento d
+    ON u.id_depto = d.id_depto
+ORDER BY u.id_depto DESC
+"""
+
+df_ubicacion_con_nombres = dd.query(query_ubicacion_con_nombres).df()
+
+query_esta_en="""
+    SELECT e.col1, a.id_provincia, a.id_depto 
+    FROM df_ubicacion_con_nombres a
+    RIGHT JOIN df_educativos e
+    ON ((LOWER(e.col0) = LOWER(a.nombre_provincia)) AND (LOWER(e.col11) = LOWER(a.nombre_depto)))
+"""
+df_esta_en=dd.query(query_esta_en).df()
+#%%
+
+
+
+#%%
+# Comienzo de las actividades y ejercicios solicitados por consigna
+# Tabla cantidad de establecimientos por nivel, en cada departamento y cantidad de poblacion en edades educativas asociadas a los mismos
+#%%
+# Tabla i)
+#inner join poblacion con ubicacion
+
+query_poblacion_ubicacion = """
+SELECT DISTINCT p.id_depto,id_provincia, edad_jardin_maternal, edad_jardin_infantil, edad_primaria, edad_secundaria, edad_secundaria_tecnica, edad_terciario, edad_terciario_tecnico
+FROM df_poblacion p 
+LEFT JOIN df_ubicacion u
+    ON p.id_depto = u.id_depto
+"""
+df_poblacion_ubicacion = dd.query(query_poblacion_ubicacion).df()
+
+#%%
+#agrego Provincia con nombre_provincia y Departamento con nombre_depto
+query_pob_ubi_con_nombres = """
+SELECT DISTINCT
+        nombre_depto AS Departamento,
+        nombre_provincia AS Provincia,
+        edad_jardin_maternal, 
+        edad_jardin_infantil, 
+        edad_primaria, 
+        edad_secundaria, 
+        edad_secundaria_tecnica, 
+        edad_terciario, 
+        edad_terciario_tecnico
+FROM df_poblacion_ubicacion pu
+INNER JOIN df_departamento d
+    ON pu.id_depto = d.id_depto
+INNER JOIN df_provincia p 
+    ON pu.id_provincia = p.id_provincia
+"""
+df_pob_ubi_con_nombres = dd.query(query_pob_ubi_con_nombres).df()
+#%%
+# generacion del df que contiene establecimientos educativos segun provincia
+query_ee_con_nombres_prov_y_depto = """
+SELECT DISTINCT e.col0 AS Provincia, e.col11 AS Departamento, cueanexo, jardin_maternal, jardin_infantil, primario, secundario, secundario_tecnico, terciario, terciario_tecnico
+FROM  df_establecimientos_educativos ee 
+INNER JOIN df_educativos e
+    ON ee.cueanexo = e.col1
+"""
+df_ee_con_nombres_prov_y_depto = dd.query(query_ee_con_nombres_prov_y_depto).df()
+#%%
+# generacion del df que contiene establecimientos educativos segun departamento y joineamos con provincia para tenerlo completo
+query_pob_ubi_prov_depto = """
+SELECT DISTINCT 
+            p.Provincia,
+            p.Departamento,
+            cueanexo AS Cueanexo,
+            jardin_maternal, 
+            jardin_infantil, 
+            primario, 
+            secundario, 
+            secundario_tecnico, 
+            terciario, 
+            terciario_tecnico,
+            edad_jardin_maternal, 
+            edad_jardin_infantil, 
+            edad_primaria, 
+            edad_secundaria, 
+            edad_secundaria_tecnica, 
+            edad_terciario, 
+            edad_terciario_tecnico
+FROM df_pob_ubi_con_nombres p 
+INNER JOIN df_ee_con_nombres_prov_y_depto e
+ON (
+    LOWER(p.Provincia)  = LOWER(e.Provincia) AND LOWER(p.Departamento) = LOWER(e.Departamento)
+    )
+"""
+df_pob_ubi_prov_depto = dd.query(query_pob_ubi_prov_depto).df()
+
+#%%
+# lista con modalidades
+cols_a_numericas = [ 
+    'jardin_maternal', 'jardin_infantil',
+    'primario', 'secundario', 'secundario_tecnico',
+    'terciario', 'terciario_tecnico'
+]
+
+# convertimos las columnas a numéricas y reemplazamos NaN por 0 para evitar errores
+# podriamos hacerlo con CASE WHEN pero son excepciones por cada una y de esta forma chequeamos y corregimos todo junto
+for c in cols_a_numericas:
+    df_pob_ubi_prov_depto[c] = (
+        pd.to_numeric(df_pob_ubi_prov_depto[c], errors='coerce')
+        .fillna(0)
+    )
+
+#query final unificador
+
+query_tabla_EE_poblacion = """
+SELECT
+    Provincia,
+    Departamento,
+
+    -- cantidad de jardines (maternal + infantil)
+    SUM(jardin_maternal + jardin_infantil) AS Jardines,
+
+    -- población total en jardín (ya viene agregada)
+    edad_jardin_maternal + edad_jardin_infantil AS "Población Jardín",
+
+    -- cantidad de primarias
+    SUM(primario) AS Primarias,
+
+    -- población total primaria (ya viene agregada)
+    edad_primaria AS "Población Primaria",
+
+    -- cantidad de secundarios (común + técnica)
+    SUM(secundario + secundario_tecnico) AS Secundarios,
+
+    -- población total secundaria (ya viene agregada)
+    edad_secundaria_tecnica AS "Población Secundaria",
+    
+
+FROM df_pob_ubi_prov_depto
+GROUP BY Provincia, Departamento,
+         edad_jardin_maternal, edad_jardin_infantil,
+         edad_primaria, edad_secundaria_tecnica         
+ORDER BY Provincia, Departamento
+"""
+
+# Tabla final del ejercicio 1
+df_tabla_EE_poblacion = dd.query(query_tabla_EE_poblacion).df()
+
+
+#%%
+# Tabla cantidad total de empleados por departamento item ii) 
+
+# a la tabla de Establecimientos Productivos le agregamos el nombre de la provincia y del departamento
+# haciendo join con df_provincia y df_departamento
+
+query_ep_en_ubicación = """
+SELECT *
+FROM df_establecimientos_productivos ep
+INNER JOIN df_departamento d
+    ON d.id_depto = ep.id_depto
+INNER JOIN df_provincia p
+    ON p.id_provincia = ep.id_provincia
+"""
+df_ep_en_ubicación = dd.query(query_ep_en_ubicación).df()
+#%%
+
+# de la tabla anterior nos quedamos solo con Nombre Provincia, Nombre Departamento, y contamos cuantos empleados
+# hay por cada Provincia y Departamento, luego ordenamos descendientemente por Provincia, y por cantidad de empleados
+
+query_empleados_por_ubicacion = """
+SELECT 
+    nombre_provincia AS Provincia,
+    nombre_depto AS Departamento,
+    COUNT(Empleo) AS Cantidad_de_empleados_en_2022
+FROM df_ep_en_ubicación
+GROUP BY nombre_provincia, nombre_depto
+ORDER BY Provincia ASC, Cantidad_de_empleados_en_2022 DESC
+"""
+# Tabla final del ejercicio 2
+df_empleados_por_ubicacion = dd.query(query_empleados_por_ubicacion).df()
+
+#%%
+#Tabla item iii)
+# tenemos poblacion por depto, con el nombre del depto, y provincia, con el nombre de la provincia
+# usamos la tabla df_pob_ubi_con_nombres que tienen la poblacion separada por depto y provincia. Sumo la cantidad total.
+
+query_poblacion_total_por_ubi = """
+SELECT 
+    Provincia, Departamento, 
+    (edad_jardin_maternal + edad_jardin_infantil + edad_primaria + edad_secundaria + edad_secundaria_tecnica + edad_terciario + edad_terciario_tecnico) AS Población
+    
+FROM df_pob_ubi_con_nombres
+"""
+
+df_poblacion_total_por_ubi = dd.query(query_poblacion_total_por_ubi).df()
+#%%
+# tenemos la población total de cada depto.
+
+# ahora, queremos la cantidad de mujeres que trabajan en empresas exportadoras, ponemos un cero en la columna 'Cant_Expo_Mujeres' cuando no cumple así no perdemos informacón
+query_mujeres = """
+SELECT 
+    id_depto,
+    id_provincia,
+    SUM(
+        CASE 
+            WHEN genero = 'Mujeres' AND empresas_exportadoras >= 1 THEN empleo 
+            ELSE 0 
+        END
+    ) AS Cant_Expo_Mujeres
+FROM df_establecimientos_productivos
+GROUP BY id_depto, id_provincia;
+"""
+df_mujeres = dd.query(query_mujeres).df()
+#%%
+# tenemos las empleadas mujeres por id_depto, queremos por sus nombres
+query_mujeres_nombres = """
+SELECT nombre_depto AS Departamento, nombre_provincia AS Provincia, Cant_Expo_Mujeres
+FROM df_mujeres m
+INNER JOIN df_departamento d 
+    ON m.id_depto = d.id_depto 
+INNER JOIN df_provincia p 
+    ON m.id_provincia = p.id_provincia 
+"""
+df_mujeres_nombres = dd.query(query_mujeres_nombres).df()
+#%%
+# tenemos las mujeres que trabajan em empresas exportadoras 
+
+# acá vemos cuantas empresas exportadoras, donde trabajan mujeres, hay por depto
+
+query_ee_mujeres = """
+SELECT 
+    id_depto,
+    id_provincia,
+    SUM(
+        CASE 
+            WHEN genero = 'Mujeres' THEN empresas_exportadoras
+            ELSE 0
+        END
+    ) AS Cant_EE
+FROM df_establecimientos_productivos
+GROUP BY id_depto, id_provincia;
+"""
+df_ee_mujeres = dd.query(query_ee_mujeres).df()
+#%%
+
+# tenemos las empresas exportadoras de mujeres por id_depto, las queremos por sus nombres
+query_ee_mujeres_nombres = """
+SELECT nombre_depto AS Departamento, nombre_provincia AS Provincia, Cant_EE
+FROM df_ee_mujeres m
+INNER JOIN df_departamento d 
+    ON m.id_depto = d.id_depto 
+INNER JOIN df_provincia p 
+    ON m.id_provincia = p.id_provincia 
+"""
+df_ee_mujeres_nombres = dd.query(query_ee_mujeres_nombres).df()
+# armamos la tabla final, juntamos todo con un JOIN por Provincia y Departamento 
+
+#%%
+# consulta final, hacemos JOIN por provincia y depto
+query_ej3 = """
+SELECT p.Provincia, p.Departamento, Cant_Expo_Mujeres, Cant_EE, Población
+FROM df_poblacion_total_por_ubi p
+INNER JOIN df_mujeres_nombres m 
+    ON (p.Provincia = m.Provincia 
+        AND 
+        p.Departamento = m.Departamento)
+INNER JOIN df_ee_mujeres_nombres ee
+    ON (p.Provincia = ee.Provincia 
+        AND 
+        p.Departamento = ee.Departamento)
+"""
+df_ej3 = dd.query(query_ej3).df()
+
+# %% Tabla Item IV
+# buscamos los departamentos con más empleo que el promedio provincial y
+# dentro de ellos, el rubro (primeros 3 dígitos del CLAE6) con más trabajadores
+
+# promedio de empleos por provincia
+query_promedio_provincia = """
+    SELECT 
+        u.id_provincia,
+        AVG(e.Empleo) AS promedio_empleo_provincia
+    FROM df_establecimientos_productivos AS e
+    INNER JOIN df_ubicacion AS u
+        ON e.id_depto = u.id_depto
+    GROUP BY u.id_provincia
+"""
+df_promedio_provincia = dd.query(query_promedio_provincia).df()
+
+#%% total de empleos por departamento
+query_empleo_departamento = """
+    SELECT 
+        u.id_provincia,
+        u.id_depto,
+        SUM(e.Empleo) AS empleo_total_departamento
+    FROM df_establecimientos_productivos AS e
+    INNER JOIN df_ubicacion AS u
+        ON e.id_depto = u.id_depto
+    GROUP BY u.id_provincia, u.id_depto
+"""
+df_empleo_departamento = dd.query(query_empleo_departamento).df()
+
+#%% departamentos cuyo empleo total supera el promedio provincial
+query_departamentos_sobre_promedio = """
+    SELECT 
+        d.id_provincia,
+        d.id_depto,
+        d.empleo_total_departamento
+    FROM df_empleo_departamento AS d
+    INNER JOIN df_promedio_provincia AS p
+        ON d.id_provincia = p.id_provincia
+    WHERE d.empleo_total_departamento > p.promedio_empleo_provincia
+"""
+df_departamentos_sobre_promedio = dd.query(query_departamentos_sobre_promedio).df()
+
+#%% empleo por los primeros tres dígitos del CLAE6 en cada departamento
+# usamos LPAD para agregar el 0 si es necesario (el CLAE6 a veces no llega a 6 digitos), y luego tomamos los 3 primeros
+query_empleo_por_clae6 = """
+    SELECT 
+        u.id_provincia,
+        u.id_depto,
+        SUBSTR(LPAD(CAST(e.clae6 AS VARCHAR), 6, '0'), 1, 3) AS clae6_3digitos,
+        SUM(e.Empleo) AS empleo_en_clae6
+    FROM df_establecimientos_productivos AS e
+    INNER JOIN df_ubicacion AS u
+        ON e.id_depto = u.id_depto
+    GROUP BY u.id_provincia, u.id_depto, clae6_3digitos
+"""
+df_empleo_por_clae6 = dd.query(query_empleo_por_clae6).df()
+
+#%% rubro que más empleo genera en cada departamento
+query_clae6_top_por_departamento = """
+    SELECT 
+        e1.id_provincia,
+        e1.id_depto,
+        e1.clae6_3digitos,
+        e1.empleo_en_clae6
+    FROM df_empleo_por_clae6 AS e1
+    INNER JOIN (
+        SELECT 
+            id_provincia, 
+            id_depto, 
+            MAX(empleo_en_clae6) AS max_empleo
+        FROM df_empleo_por_clae6
+        GROUP BY id_provincia, id_depto
+    ) AS e2
+        ON e1.id_provincia = e2.id_provincia
+        AND e1.id_depto = e2.id_depto
+        AND e1.empleo_en_clae6 = e2.max_empleo
+"""
+df_clae6_top_por_departamento = dd.query(query_clae6_top_por_departamento).df()
+
+#%% resultado final tabla 4:  rubro más fuerte, con cantidad de empleados asociados de los departamentos con empleo mayor al promedio provincial
+
+query_rubro_empleo_max = """
+    SELECT 
+        p.nombre_provincia,
+        dpto.nombre_depto,
+        c.clae6_3digitos AS clae6_mas_empleo,
+        c.empleo_en_clae6 AS empleo_en_rubro
+    FROM df_departamentos_sobre_promedio AS dep
+    INNER JOIN df_clae6_top_por_departamento AS c
+        ON dep.id_provincia = c.id_provincia
+        AND dep.id_depto = c.id_depto
+    INNER JOIN df_provincia AS p
+        ON dep.id_provincia = p.id_provincia
+    INNER JOIN df_departamento AS dpto
+        ON dep.id_depto = dpto.id_depto
+    ORDER BY p.nombre_provincia, dpto.nombre_depto
+"""
+
+df_rubro_empleo_max = dd.query(query_rubro_empleo_max).df()
+
+# finaliza la parte de tablas del tp.
+#%%
+# comenzamosla parte de visualizacion
+
+query_empleados_por_prov = """
+SELECT 
+    Provincia,
+    SUM(Cantidad_de_empleados_en_2022) AS cant_por_prov
+FROM df_empleados_por_ubicacion
+GROUP BY Provincia
+ORDER BY cant_por_prov DESC
+"""
+
+df_empleados_por_prov = dd.query(query_empleados_por_prov).df()
+
+
+# configuramos el estilo general
+plt.style.use('seaborn-v0_8-darkgrid')
+
+# creamos el objeto
+fig, ax = plt.subplots(figsize=(12, 6))
+
+# elegimos grafico de barras ya que es muy facil notar las diferencias entre cantidades y la cantidad de provincias no es tan grande que lo hace engorroso.
+ax.bar(df_empleados_por_prov['Provincia'], df_empleados_por_prov['cant_por_prov'], 
+       color='#4A90E2', edgecolor='black', alpha=0.85)
+
+# título y etiquetas
+ax.set_title('Cantidad de empleados por provincia (2022)', fontsize=16, fontweight='bold', pad=15)
+ax.set_xlabel('Provincia', fontsize=12)
+ax.set_ylabel('Cantidad de empleados', fontsize=12)
+
+# rotamos etiquetas del eje X para facilitar la lectura
+plt.xticks(rotation=45, ha='right')
+
+# agregamos valores encima de las barras para mayor presicion 
+for i, val in enumerate(df_empleados_por_prov['cant_por_prov']):
+    ax.text(i, val + val*0.01, f"{int(val):,}", ha='center', va='bottom', fontsize=9)
+
+# ajustamos márgenes
+plt.tight_layout()
+
+# grafico en si
+plt.show()
+
+

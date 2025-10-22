@@ -32,3 +32,43 @@ df_colon = dd.query(colon).df()
 print(df_colon)
 
 
+#%% 
+#GQM del cuadro Datos_por_departamento_actividad_y_sexo
+#Problema: los establecimientos que tienen sólo un género, no aparecen devuelta con el género que no tienen con un 0 en empleo.
+
+#Me fijo cuántas filas sin contar las columnas Genero y Empleo, hay distintas. Osea cuantos establecimientos productivos hay en total.
+query_gqm = """
+SELECT
+  (SELECT COUNT(*) FROM df_productivos) AS total_filas,
+  (SELECT COUNT(*) 
+   FROM (
+     SELECT DISTINCT 
+       anio,
+       in_departamentos,
+       departamento,
+       provincia_id,
+       provincia,
+       clae6,
+       clae2,
+       letra,
+       Establecimientos,
+       empresas_exportadoras
+     FROM df_productivos
+   ) AS unicas
+  ) AS total_unicas;
+
+"""
+df_gqm2 = dd.query(query_gqm).df()
+
+#Acá me aseguro que no haya espacions Null en Empleo:
+query_empleo = """
+SELECT COUNT(Empleo) AS total_no_nulos
+FROM df_productivos
+"""
+df_empleo = dd.query(query_empleo).df()
+
+establecimientos_con_ambos_generos = (df_gqm2['total_filas'] - df_gqm2['total_unicas'])
+
+establecimientos_con_un_genero = df_gqm2['total_filas'] - (2*(establecimientos_con_ambos_generos))
+
+
